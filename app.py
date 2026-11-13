@@ -9,9 +9,9 @@ from fpdf import FPDF
 
 app = Flask(__name__)
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+SECRET_KEY = "Phuc2k5@"
 VN_TZ = timezone(timedelta(hours=7))
 
-# Chuyển tiếng Việt có dấu sang không dấu cho PDF
 def remove_accents(input_str):
     if not input_str:
         return ""
@@ -30,6 +30,17 @@ def tg_api(method, payload=None):
     except Exception as e:
         print(f"Loi API {method}:", e)
         return None
+
+# Đăng ký danh sách lệnh để khi gõ "/" sẽ tự động hiện menu
+def setup_bot_commands():
+    commands = [
+        {"command": "thongke", "description": "Xem bang thong ke thu chi va so du"},
+        {"command": "pdf", "description": "Xuat phieu bao cao thu chi file PDF"},
+        {"command": "xoa", "description": "Xoa giao dich vua nhap gan nhat"},
+        {"command": "reset", "description": "Xoa toan bo du lieu lam lai tu dau"},
+        {"command": "help", "description": "Xem huong dan su dung bot"}
+    ]
+    return tg_api("setMyCommands", {"commands": commands})
 
 def send_message(chat_id, text):
     return tg_api("sendMessage", {
@@ -75,12 +86,10 @@ def send_document(chat_id, file_path, filename, caption=""):
 def format_money(amount, currency="đ"):
     return f"{amount:,.0f}".replace(",", ".") + (f" {currency}" if currency else "")
 
-# Tạo file PDF tiếng Việt không dấu (có cột Số dư từng giao dịch)
 def generate_pdf(transactions):
     pdf = FPDF()
     pdf.add_page()
     
-    # Dùng font Helvetica mặc định (không cần tải mạng)
     pdf.set_font("Helvetica", "B", 16)
     now_str = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M")
     pdf.cell(0, 10, "PHIEU BAO CAO THU CHI CA NHAN", new_x="LMARGIN", new_y="NEXT", align="C")
@@ -93,7 +102,6 @@ def generate_pdf(transactions):
     tong_chi = sum(x["amount"] for x in transactions if x["type"] == "CHI")
     so_du = tong_thu - tong_chi
 
-    # Khung tổng kết
     pdf.set_font("Helvetica", "B", 11)
     pdf.set_fill_color(240, 248, 255)
     pdf.cell(0, 8, f"  Tong Thu:  +{format_money(tong_thu, 'd')}", new_x="LMARGIN", new_y="NEXT", fill=True)
@@ -101,7 +109,6 @@ def generate_pdf(transactions):
     pdf.cell(0, 8, f"  So Du:      {format_money(so_du, 'd')}", new_x="LMARGIN", new_y="NEXT", fill=True)
     pdf.ln(7)
 
-    # Tiêu đề bảng (Tổng chiều rộng = 190mm vừa khít khổ A4)
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_fill_color(50, 50, 50)
     pdf.set_text_color(255, 255, 255)
@@ -111,7 +118,6 @@ def generate_pdf(transactions):
     pdf.cell(35, 8, "So du", border=1, align="R", fill=True)
     pdf.cell(80, 8, "Noi dung", border=1, align="L", fill=True, new_x="LMARGIN", new_y="NEXT")
 
-    # Dữ liệu từng dòng và tính số dư lũy kế
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(0, 0, 0)
     running_balance = 0
@@ -137,7 +143,8 @@ def generate_pdf(transactions):
     pdf.output(out_path)
     return out_path
 
-def get_transactions(chat_id):
+# Đọc trạng thái xác thực và dữ liệu giao dịch từ tin nhắn ghim
+def get_chat_data(chat_id):
     res = tg_api("getChat", {"chat_id": chat_id})
     if res and res.get("ok"):
         pinned = res["result"].get("pinned_message")
@@ -146,16 +153,22 @@ def get_transactions(chat_id):
             if "DATA_JSON:" in text:
                 try:
                     json_str = text.split("DATA_JSON:")[1].strip()
-                    return json.loads(json_str), pinned["message_id"]
+                    parsed = json.loads(json_str)
+                    # Tương thích ngược với dữ liệu cũ (dạng list)
+                    if isinstance(parsed, list):
+                        return {"auth": False, "txs": parsed}, pinned["message_id"]
+                    return parsed, pinned["message_id"]
                 except:
                     pass
-    return [], None
+    return {"auth": False, "txs": []}, None
 
-def save_transactions(chat_id, transactions, old_msg_id=None):
-    json_str = json.dumps(transactions, ensure_ascii=False)
+# Lưu trạng thái xác thực và dữ liệu giao dịch vào tin nhắn ghim
+def save_chat_data(chat_id, data_obj, old_msg_id=None):
+    json_str = json.dumps(data_obj, ensure_ascii=False)
+    txs = data_obj.get("txs", [])
     msg_text = (
         f"🗄 <b>CƠ SỞ DỮ LIỆU THU CHI</b> (Không xóa tin này)\n"
-        f"<i>Tổng số giao dịch đã lưu: {len(transactions)}</i>\n\n"
+        f"<i>Trạng thái: Đã xác thực | Giao dịch: {len(txs)}</i>\n\n"
         f"<code>DATA_JSON:{json_str}</code>"
     )
     if old_msg_id:
@@ -195,7 +208,8 @@ def calc_balance(transactions):
 
 @app.route('/', methods=['GET'])
 def index():
-    return "Bot Quản Lý Thu Chi + Xuất PDF đang hoạt động 🚀", 200
+    setup_bot_commands()
+    return "Bot Quản Lý Thu Chi (Đã bật khóa Key & Menu lệnh) 🚀", 200
 
 @app.route('/api/webhook', methods=['POST'])
 def webhook():
@@ -210,15 +224,40 @@ def webhook():
     if not text:
         return "OK", 200
 
+    chat_data, pinned_id = get_chat_data(chat_id)
+    is_auth = chat_data.get("auth", False)
+    txs = chat_data.get("txs", [])
+
+    # KIỂM TRA KHÓA BẢO MẬT (KEY)
+    if not is_auth:
+        if text == SECRET_KEY:
+            chat_data["auth"] = True
+            save_chat_data(chat_id, chat_data, pinned_id)
+            setup_bot_commands()
+            send_message(
+                chat_id,
+                "✅ <b>Xác thực thành công!</b> Chào mừng bạn quay trở lại.\n"
+                "Hãy gõ dấu <code>/</code> để xem toàn bộ menu lệnh hoặc nhập <code>+ 100k Lương</code> để bắt đầu."
+            )
+        else:
+            send_message(
+                chat_id,
+                "🔒 <b>BOT ĐƯỢC BẢO VỆ BẰNG MẬT KHẨU</b>\n\n"
+                "Vui lòng nhập chính xác <b>Key kích hoạt</b> để sử dụng các chức năng của bot:"
+            )
+        return "OK", 200
+
+    # --- CÁC CHỨC NĂNG SAU KHI ĐÃ XÁC THỰC KEY ---
     if text in ["/start", "/help"]:
+        setup_bot_commands()
         guide = (
             "💰 <b>BOT QUẢN LÝ THU CHI CÁ NHÂN</b>\n\n"
             "• <b>Nhập Thu:</b> <code>+ 100k Lương</code>\n"
             "• <b>Nhập Chi:</b> <code>- 45k Ăn trưa</code>\n"
-            "• <b>Xem thống kê nhanh:</b> <code>/thongke</code> (hoặc <code>/tk</code>)\n"
-            "• <b>Xuất phiếu báo cáo PDF:</b> <code>/pdf</code>\n"
-            "• <b>Xóa giao dịch vừa nhập:</b> <code>/xoa</code>\n"
-            "• <b>Xóa toàn bộ dữ liệu:</b> <code>/reset</code>"
+            "• <b>Xem thống kê:</b> /thongke\n"
+            "• <b>Xuất phiếu PDF:</b> /pdf\n"
+            "• <b>Xóa giao dịch vừa nhập:</b> /xoa\n"
+            "• <b>Xóa toàn bộ dữ liệu:</b> /reset"
         )
         send_message(chat_id, guide)
 
@@ -230,17 +269,17 @@ def webhook():
             amount = parse_amount(parts[0])
             if amount <= 0:
                 raise ValueError()
-            note = parts[1].strip() if len(parts) > 1 else "Không ghi chú"
+            note = parts[1].strip() if len(parts) > 1 else "Khong ghi chu"
             now_str = datetime.now(VN_TZ).strftime("%d/%m %H:%M")
 
-            txs, pinned_id = get_transactions(chat_id)
             txs.append({
                 "type": t_type,
                 "amount": amount,
                 "note": note,
                 "time": now_str
             })
-            save_transactions(chat_id, txs, pinned_id)
+            chat_data["txs"] = txs
+            save_chat_data(chat_id, chat_data, pinned_id)
 
             so_du = calc_balance(txs)
             icon = "🟢" if t_type == "THU" else "🔴"
@@ -254,7 +293,6 @@ def webhook():
             send_message(chat_id, "⚠️ Sai cú pháp! Hãy nhập đúng dạng: <code>- 50k Cà phê</code> hoặc <code>+ 100k Lương</code>")
 
     elif text in ["/thongke", "/tk"]:
-        txs, _ = get_transactions(chat_id)
         if not txs:
             send_message(chat_id, "📭 Chưa có dữ liệu thu chi nào.")
             return "OK", 200
@@ -280,12 +318,11 @@ def webhook():
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📝 <b>10 giao dịch gần nhất:</b>\n\n"
             f"{history_text}\n\n"
-            f"📄 <i>Gõ /pdf để tải toàn bộ phiếu báo cáo dạng file PDF</i>"
+            f"📄 <i>Bấm /pdf để tải phiếu báo cáo chi tiết</i>"
         )
         send_message(chat_id, report)
 
     elif text == "/pdf":
-        txs, _ = get_transactions(chat_id)
         if not txs:
             send_message(chat_id, "📭 Chưa có giao dịch nào để xuất phiếu PDF!")
             return "OK", 200
@@ -298,12 +335,12 @@ def webhook():
             send_message(chat_id, f"❌ Lỗi khi tạo file PDF: {e}")
 
     elif text == "/xoa":
-        txs, pinned_id = get_transactions(chat_id)
         if not txs:
             send_message(chat_id, "📭 Không có giao dịch nào để xóa.")
         else:
             removed = txs.pop()
-            save_transactions(chat_id, txs, pinned_id)
+            chat_data["txs"] = txs
+            save_chat_data(chat_id, chat_data, pinned_id)
             so_du = calc_balance(txs)
             send_message(
                 chat_id,
@@ -312,11 +349,11 @@ def webhook():
             )
 
     elif text == "/reset":
-        _, pinned_id = get_transactions(chat_id)
-        save_transactions(chat_id, [], pinned_id)
+        chat_data["txs"] = []
+        save_chat_data(chat_id, chat_data, pinned_id)
         send_message(chat_id, "🔄 Đã xóa sạch toàn bộ dữ liệu thu chi về 0 đ!")
 
     else:
-        send_message(chat_id, "💡 Gõ <code>+ 100k Lương</code> để ghi thu, <code>- 40k Ăn trưa</code> để ghi chi, <code>/tk</code> để xem thống kê hoặc <code>/pdf</code> để xuất file PDF.")
+        send_message(chat_id, "💡 Gõ <code>+ 100k Lương</code> để ghi thu, <code>- 40k Ăn trưa</code> để ghi chi, hoặc gõ dấu <code>/</code> để chọn lệnh.")
 
     return "OK", 200
