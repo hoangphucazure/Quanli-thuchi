@@ -1,15 +1,23 @@
 from flask import Flask, request
 import urllib.request
-import urllib.parse
 import json
 import os
 import uuid
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from fpdf import FPDF
 
 app = Flask(__name__)
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 VN_TZ = timezone(timedelta(hours=7))
+
+# Chuyển tiếng Việt có dấu sang không dấu cho PDF
+def remove_accents(input_str):
+    if not input_str:
+        return ""
+    s = input_str.replace("đ", "d").replace("Đ", "D")
+    nfkd_form = unicodedata.normalize('NFKD', s)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def tg_api(method, payload=None):
     url = f"https://api.telegram.org/bot{TOKEN}/{method}"
@@ -20,7 +28,7 @@ def tg_api(method, payload=None):
         with urllib.request.urlopen(req) as res:
             return json.loads(res.read().decode("utf-8"))
     except Exception as e:
-        print(f"Lỗi API {method}:", e)
+        print(f"Loi API {method}:", e)
         return None
 
 def send_message(chat_id, text):
@@ -30,20 +38,17 @@ def send_message(chat_id, text):
         "parse_mode": "HTML"
     })
 
-# Hàm gửi file tài liệu (PDF) lên Telegram bằng multipart/form-data
 def send_document(chat_id, file_path, filename, caption=""):
     url = f"https://api.telegram.org/bot{TOKEN}/sendDocument"
     boundary = f"----WebKitFormBoundary{uuid.uuid4().hex}"
     body = []
 
-    # Thêm chat_id và caption
     for name, val in [("chat_id", str(chat_id)), ("caption", caption)]:
         body.append(f"--{boundary}".encode())
         body.append(f'Content-Disposition: form-data; name="{name}"'.encode())
         body.append(b"")
         body.append(val.encode("utf-8"))
 
-    # Thêm file PDF
     with open(file_path, "rb") as f:
         file_data = f.read()
     body.append(f"--{boundary}".encode())
@@ -64,29 +69,24 @@ def send_document(chat_id, file_path, filename, caption=""):
         with urllib.request.urlopen(req) as res:
             return json.loads(res.read().decode("utf-8"))
     except Exception as e:
-        print("Lỗi gửi PDF:", e)
+        print("Loi gui PDF:", e)
         return None
 
-# Tải font tiếng Việt (DejaVuSans) vào thư mục tạm /tmp của Vercel
-def get_vn_font():
-    font_path = "/tmp/DejaVuSans.ttf"
-    if not os.path.exists(font_path):
-        font_url = "https://github.com/matomo-org/travis-scripts/raw/master/fonts/DejaVuSans.ttf"
-        urllib.request.urlretrieve(font_url, font_path)
-    return font_path
+def format_money(amount, currency="đ"):
+    return f"{amount:,.0f}".replace(",", ".") + (f" {currency}" if currency else "")
 
-# Tạo file PDF báo cáo thu chi
+# Tạo file PDF tiếng Việt không dấu (có cột Số dư từng giao dịch)
 def generate_pdf(transactions):
     pdf = FPDF()
     pdf.add_page()
-    font_path = get_vn_font()
-    pdf.add_font("DejaVu", "", font_path, uni=True)
-    pdf.set_font("DejaVu", size=16)
-
+    
+    # Dùng font Helvetica mặc định (không cần tải mạng)
+    pdf.set_font("Helvetica", "B", 16)
     now_str = datetime.now(VN_TZ).strftime("%d/%m/%Y %H:%M")
-    pdf.cell(0, 10, "PHIẾU BÁO CÁO THU CHI CÁ NHÂN", ln=True, align="C")
-    pdf.set_font("DejaVu", size=10)
-    pdf.cell(0, 8, f"Ngày xuất phiếu: {now_str}", ln=True, align="C")
+    pdf.cell(0, 10, "PHIEU BAO CAO THU CHI CA NHAN", new_x="LMARGIN", new_y="NEXT", align="C")
+    
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 7, f"Ngay xuat phieu: {now_str}", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(5)
 
     tong_thu = sum(x["amount"] for x in transactions if x["type"] == "THU")
@@ -94,35 +94,44 @@ def generate_pdf(transactions):
     so_du = tong_thu - tong_chi
 
     # Khung tổng kết
-    pdf.set_font("DejaVu", size=11)
+    pdf.set_font("Helvetica", "B", 11)
     pdf.set_fill_color(240, 248, 255)
-    pdf.cell(0, 9, f"  Tổng Thu:  +{format_money(tong_thu)}", ln=True, fill=True)
-    pdf.cell(0, 9, f"  Tổng Chi:  -{format_money(tong_chi)}", ln=True, fill=True)
-    pdf.cell(0, 9, f"  Số Dư:      {format_money(so_du)}", ln=True, fill=True)
-    pdf.ln(8)
+    pdf.cell(0, 8, f"  Tong Thu:  +{format_money(tong_thu, 'd')}", new_x="LMARGIN", new_y="NEXT", fill=True)
+    pdf.cell(0, 8, f"  Tong Chi:  -{format_money(tong_chi, 'd')}", new_x="LMARGIN", new_y="NEXT", fill=True)
+    pdf.cell(0, 8, f"  So Du:      {format_money(so_du, 'd')}", new_x="LMARGIN", new_y="NEXT", fill=True)
+    pdf.ln(7)
 
-    # Tiêu đề bảng chi tiết
-    pdf.set_font("DejaVu", size=10)
+    # Tiêu đề bảng (Tổng chiều rộng = 190mm vừa khít khổ A4)
+    pdf.set_font("Helvetica", "B", 9)
     pdf.set_fill_color(50, 50, 50)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(15, 9, "STT", border=1, align="C", fill=True)
-    pdf.cell(35, 9, "Thời gian", border=1, align="C", fill=True)
-    pdf.cell(20, 9, "Loại", border=1, align="C", fill=True)
-    pdf.cell(45, 9, "Số tiền", border=1, align="R", fill=True)
-    pdf.cell(75, 9, "Nội dung ghi chú", border=1, align="L", fill=True)
-    pdf.ln()
+    pdf.cell(12, 8, "STT", border=1, align="C", fill=True)
+    pdf.cell(28, 8, "Thoi gian", border=1, align="C", fill=True)
+    pdf.cell(35, 8, "Thu / Chi", border=1, align="R", fill=True)
+    pdf.cell(35, 8, "So du", border=1, align="R", fill=True)
+    pdf.cell(80, 8, "Noi dung", border=1, align="L", fill=True, new_x="LMARGIN", new_y="NEXT")
 
-    # Dữ liệu từng dòng
+    # Dữ liệu từng dòng và tính số dư lũy kế
+    pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(0, 0, 0)
+    running_balance = 0
+
     for idx, x in enumerate(transactions, 1):
-        sign = "+" if x["type"] == "THU" else "-"
-        note = x["note"][:32] + "..." if len(x["note"]) > 35 else x["note"]
-        pdf.cell(15, 8, str(idx), border=1, align="C")
-        pdf.cell(35, 8, x["time"], border=1, align="C")
-        pdf.cell(20, 8, x["type"], border=1, align="C")
-        pdf.cell(45, 8, f"{sign}{format_money(x['amount'])}", border=1, align="R")
-        pdf.cell(75, 8, f" {note}", border=1, align="L")
-        pdf.ln()
+        if x["type"] == "THU":
+            running_balance += x["amount"]
+            sign = "+"
+        else:
+            running_balance -= x["amount"]
+            sign = "-"
+
+        clean_note = remove_accents(x["note"])
+        note = clean_note[:38] + "..." if len(clean_note) > 40 else clean_note
+
+        pdf.cell(12, 8, str(idx), border=1, align="C")
+        pdf.cell(28, 8, x["time"], border=1, align="C")
+        pdf.cell(35, 8, f"{sign}{format_money(x['amount'], '')} ", border=1, align="R")
+        pdf.cell(35, 8, f"{format_money(running_balance, '')} ", border=1, align="R")
+        pdf.cell(80, 8, f" {note}", border=1, align="L", new_x="LMARGIN", new_y="NEXT")
 
     out_path = "/tmp/phieu_thu_chi.pdf"
     pdf.output(out_path)
@@ -167,9 +176,6 @@ def save_transactions(chat_id, transactions, old_msg_id=None):
             "disable_notification": True
         })
 
-def format_money(amount):
-    return f"{amount:,.0f}".replace(",", ".") + " đ"
-
 def parse_amount(raw_str):
     s = raw_str.lower().strip()
     multiplier = 1
@@ -181,6 +187,11 @@ def parse_amount(raw_str):
         s = s[:-2] if s.endswith("tr") else s[:-1]
     s = s.replace(".", "").replace(",", "")
     return int(float(s) * multiplier)
+
+def calc_balance(transactions):
+    thu = sum(x["amount"] for x in transactions if x["type"] == "THU")
+    chi = sum(x["amount"] for x in transactions if x["type"] == "CHI")
+    return thu - chi
 
 @app.route('/', methods=['GET'])
 def index():
@@ -202,7 +213,7 @@ def webhook():
     if text in ["/start", "/help"]:
         guide = (
             "💰 <b>BOT QUẢN LÝ THU CHI CÁ NHÂN</b>\n\n"
-            "• <b>Nhập Thu:</b> <code>+ 15tr Lương tháng</code>\n"
+            "• <b>Nhập Thu:</b> <code>+ 100k Lương</code>\n"
             "• <b>Nhập Chi:</b> <code>- 45k Ăn trưa</code>\n"
             "• <b>Xem thống kê nhanh:</b> <code>/thongke</code> (hoặc <code>/tk</code>)\n"
             "• <b>Xuất phiếu báo cáo PDF:</b> <code>/pdf</code>\n"
@@ -231,16 +242,16 @@ def webhook():
             })
             save_transactions(chat_id, txs, pinned_id)
 
+            so_du = calc_balance(txs)
             icon = "🟢" if t_type == "THU" else "🔴"
+            sign = "+" if t_type == "THU" else "-"
             reply = (
-                f"{icon} <b>Đã ghi nhận khoản {t_type}:</b>\n"
-                f"• Số tiền: <b>{format_money(amount)}</b>\n"
-                f"• Nội dung: {note}\n"
-                f"• Thời gian: {now_str}"
+                f"{icon} <b>Đã ghi nhận: {sign}{format_money(amount)}</b> ({note})\n"
+                f"💰 <b>Số dư hiện tại: {format_money(so_du)}</b>"
             )
             send_message(chat_id, reply)
         except:
-            send_message(chat_id, "⚠️ Sai cú pháp! Hãy nhập đúng dạng: <code>- 50k Cà phê</code> hoặc <code>+ 10tr Lương</code>")
+            send_message(chat_id, "⚠️ Sai cú pháp! Hãy nhập đúng dạng: <code>- 50k Cà phê</code> hoặc <code>+ 100k Lương</code>")
 
     elif text in ["/thongke", "/tk"]:
         txs, _ = get_transactions(chat_id)
@@ -279,7 +290,6 @@ def webhook():
             send_message(chat_id, "📭 Chưa có giao dịch nào để xuất phiếu PDF!")
             return "OK", 200
 
-        send_message(chat_id, "⏳ Đang tạo phiếu thu chi PDF, vui lòng đợi vài giây...")
         try:
             pdf_path = generate_pdf(txs)
             date_tag = datetime.now(VN_TZ).strftime("%d-%m-%Y")
@@ -294,14 +304,19 @@ def webhook():
         else:
             removed = txs.pop()
             save_transactions(chat_id, txs, pinned_id)
-            send_message(chat_id, f"🗑 Đã xóa giao dịch gần nhất: <b>{removed['type']} {format_money(removed['amount'])}</b> ({removed['note']})")
+            so_du = calc_balance(txs)
+            send_message(
+                chat_id,
+                f"🗑 Đã xóa: <b>{removed['type']} {format_money(removed['amount'])}</b> ({removed['note']})\n"
+                f"💰 <b>Số dư hiện tại: {format_money(so_du)}</b>"
+            )
 
     elif text == "/reset":
         _, pinned_id = get_transactions(chat_id)
         save_transactions(chat_id, [], pinned_id)
-        send_message(chat_id, "🔄 Đã xóa sạch toàn bộ dữ liệu thu chi về 0!")
+        send_message(chat_id, "🔄 Đã xóa sạch toàn bộ dữ liệu thu chi về 0 đ!")
 
     else:
-        send_message(chat_id, "💡 Gõ <code>+ 500k Lương</code> để ghi thu, <code>- 40k Ăn trưa</code> để ghi chi, <code>/tk</code> để xem thống kê hoặc <code>/pdf</code> để xuất file PDF.")
+        send_message(chat_id, "💡 Gõ <code>+ 100k Lương</code> để ghi thu, <code>- 40k Ăn trưa</code> để ghi chi, <code>/tk</code> để xem thống kê hoặc <code>/pdf</code> để xuất file PDF.")
 
     return "OK", 200
