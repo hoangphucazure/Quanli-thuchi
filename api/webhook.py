@@ -2,10 +2,11 @@ from flask import Flask, request
 import telebot
 import os
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-# Bắt buộc phải có threaded=False để không bị lỗi 500 trên Vercel
-bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__)
+
+# Lấy token an toàn
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+bot = telebot.TeleBot(TOKEN, threaded=False) if TOKEN else None
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -15,13 +16,17 @@ def send_welcome(message):
 def echo_all(message):
     bot.reply_to(message, f"Bạn vừa nói: {message.text}")
 
+@app.route('/', methods=['GET'])
+def index():
+    if not TOKEN:
+        return "Lỗi: Chưa tìm thấy biến TELEGRAM_TOKEN trên Vercel!", 500
+    return "Bot đang hoạt động 🚀", 200
+
 @app.route('/api/webhook', methods=['POST'])
 def webhook():
+    if not bot:
+        return "Bot chưa được cấu hình Token", 500
     json_string = request.get_data().decode('utf-8')
     update = telebot.types.Update.de_json(json_string)
     bot.process_new_updates([update])
     return "OK", 200
-
-@app.route('/')
-def index():
-    return "Bot đang hoạt động 🚀", 200
