@@ -274,7 +274,7 @@ def render_stats_text(txs, cat_name="Tất cả loại tiền"):
 @app.route('/', methods=['GET'])
 def index():
     setup_bot_commands()
-    return "Bot Quản Lý Thu Chi (Hỏi chọn tag loại tiền) đang hoạt động 🚀", 200
+    return "đang hoạt động", 200
 
 @app.route('/api/webhook', methods=['POST'])
 def webhook():
