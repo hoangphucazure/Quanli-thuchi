@@ -98,7 +98,6 @@ def send_document(chat_id, file_path, filename, caption=""):
 def format_money(amount, currency="đ"):
     return f"{amount:,.0f}".replace(",", ".") + (f" {currency}" if currency else "")
 
-# Tạo bàn phím hiển thị toàn bộ tag các loại tiền đã thêm
 def build_cat_keyboard(categories, prefix, include_all=False):
     keyboard = []
     row = []
@@ -137,7 +136,6 @@ def generate_pdf(transactions, filter_cat="ALL"):
     pdf.cell(0, 8, f"  So Du:      {format_money(so_du, 'd')}", new_x="LMARGIN", new_y="NEXT", fill=True)
     pdf.ln(7)
 
-    # Tiêu đề bảng (Tổng = 190mm)
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_fill_color(50, 50, 50)
     pdf.set_text_color(255, 255, 255)
@@ -330,7 +328,10 @@ def webhook():
             chat_data["pending"] = None
             save_chat_data(chat_id, chat_data, pinned_id)
 
-            tong_so_du = calc_balance(txs)
+            # FIX: Tính số dư riêng của đúng loại tiền vừa chọn
+            so_du_rieng = calc_balance(txs, selected_cat)
+            tong_tat_ca = calc_balance(txs)
+
             icon = "🟢" if pending["type"] == "THU" else "🔴"
             sign = "+" if pending["type"] == "THU" else "-"
             note_display = f" ({pending['note']})" if pending.get("note") and pending["note"] != "Khong ghi chu" else ""
@@ -338,7 +339,8 @@ def webhook():
             reply = (
                 f"{icon} <b>Đã lưu: {sign}{format_money(pending['amount'])}</b>{note_display}\n"
                 f"🏷 Loại tiền: <b>{selected_cat}</b>\n"
-                f"💰 <b>Số dư hiện tại: {format_money(tong_so_du)}</b>"
+                f"💰 <b>Số dư [{selected_cat}]: {format_money(so_du_rieng)}</b>\n"
+                f"<i>(Tổng tất cả loại tiền: {format_money(tong_tat_ca)})</i>"
             )
             edit_message(chat_id, msg_id, reply)
 
@@ -459,7 +461,7 @@ def webhook():
         kb = build_cat_keyboard(cats, "DELCAT", include_all=False)
         send_message(chat_id, "🗑 Bấm chọn <b>loại tiền</b> bạn muốn xóa:", reply_markup=kb)
 
-    # 3. Nhập Thu (+) hoặc Chi (-) -> LUÔN HỎI LOẠI TIỀN TRƯỚC VÀ HIỆN TAG ĐỂ BẤM
+    # 3. Nhập Thu (+) hoặc Chi (-)
     elif text.startswith("+") or text.startswith("-"):
         t_type = "THU" if text.startswith("+") else "CHI"
         content = text[1:].strip()
@@ -471,7 +473,6 @@ def webhook():
             note = parts[1].strip() if len(parts) > 1 else "Khong ghi chu"
             now_str = datetime.now(VN_TZ).strftime("%d/%m %H:%M")
 
-            # Lưu tạm giao dịch chờ bấm tag
             chat_data["pending"] = {
                 "type": t_type,
                 "amount": amount,
@@ -492,7 +493,7 @@ def webhook():
         except:
             send_message(chat_id, "⚠️ Sai cú pháp! Hãy nhập đúng dạng: <code>+100k</code> hoặc <code>-50k mua rau</code>")
 
-    # 4. Xem Thống kê -> Hỏi chọn loại tiền trước
+    # 4. Xem Thống kê
     elif text in ["/thongke", "/tk"]:
         if not txs:
             send_message(chat_id, "📭 Chưa có dữ liệu thu chi nào.")
@@ -500,7 +501,7 @@ def webhook():
         kb = build_cat_keyboard(cats, "STAT", include_all=True)
         send_message(chat_id, "📊 Bạn muốn xem thống kê của <b>loại tiền</b> nào?", reply_markup=kb)
 
-    # 5. Xuất PDF -> Hỏi chọn loại tiền trước
+    # 5. Xuất PDF
     elif text == "/pdf":
         if not txs:
             send_message(chat_id, "📭 Chưa có giao dịch nào để xuất phiếu PDF!")
@@ -516,11 +517,17 @@ def webhook():
             removed = txs.pop()
             chat_data["txs"] = txs
             save_chat_data(chat_id, chat_data, pinned_id)
-            so_du = calc_balance(txs)
+
+            # FIX: Hiển thị số dư riêng của loại tiền vừa xóa giao dịch
+            removed_cat = removed.get("cat", "Khác")
+            so_du_rieng = calc_balance(txs, removed_cat)
+            tong_tat_ca = calc_balance(txs)
+
             send_message(
                 chat_id,
-                f"🗑 Đã xóa: <b>{removed['type']} {format_money(removed['amount'])}</b> [{removed.get('cat', 'Khác')}]\n"
-                f"💰 <b>Số dư hiện tại: {format_money(so_du)}</b>"
+                f"🗑 Đã xóa: <b>{removed['type']} {format_money(removed['amount'])}</b> [{removed_cat}]\n"
+                f"💰 <b>Số dư [{removed_cat}]: {format_money(so_du_rieng)}</b>\n"
+                f"<i>(Tổng tất cả loại tiền: {format_money(tong_tat_ca)})</i>"
             )
 
     # 7. Reset toàn bộ
@@ -534,4 +541,3 @@ def webhook():
         send_message(chat_id, "💡 Gõ <code>+100k</code> hoặc <code>-50k</code> để nhập thu chi, hoặc gõ dấu <code>/</code> để chọn lệnh.")
 
     return "OK", 200
-
